@@ -1,0 +1,7 @@
+AUTHORS
+ChangeLog
+.coverage
+*.egg-info
+*.pyc
+.tox
+*.swp
