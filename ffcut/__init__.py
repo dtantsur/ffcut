@@ -1,4 +1,12 @@
 import collections
+import logging
+import os
+import shutil
+import subprocess
+
+
+LOG = logging.getLogger(__name__)
+FFMPEG_DEBUG = False
 
 
 class Time(collections.namedtuple('Time', ('hour', 'minute', 'second', 'ms'))):
@@ -26,6 +34,9 @@ class Time(collections.namedtuple('Time', ('hour', 'minute', 'second', 'ms'))):
     def __add__(self, other):
         # TODO(dt): fix overflow (maybe just switch to stdlib time?)
         return Time(*(x + y for (x, y) in zip(self, other)))
+
+    def to_ffmpeg(self):
+        return '%s:%s:%s.%s' % self
 
 
 class EndOfFile(object):
@@ -59,3 +70,72 @@ class Slice(collections.namedtuple('Slice', ('begin', 'end'))):
                 end = begin + end
 
         return super(Slice, cls).__new__(cls, begin, end)
+
+
+def ffmpeg(cmd):
+    """Run ffmpeg with a given command line."""
+    base_cmd = ['ffmpeg', '-y']
+    if not FFMPEG_DEBUG:
+        base_cmd += ['-loglevel', 'error']
+    cmd = base_cmd + list(cmd)
+    LOG.debug('Running %s', cmd)
+    return subprocess.check_call(cmd)
+
+
+def safe_delete(files):
+    if not isinstance(files, list):
+        files = [files]
+
+    for fname in files:
+        try:
+            os.remove(fname)
+        except EnvironmentError as exc:
+            LOG.warning('Unable to delete file %s: %s', fname, exc)
+
+
+def merge(input_files, output_file_name):
+    """Merge several similar files into one."""
+    if len(input_files) == 1:
+        LOG.info('Copying resulting file %s into %s',
+                 input_files[0], output_file_name)
+        shutil.copy(input_files[0], output_file_name)
+        return
+
+    files_fname = '%s.files.txt' % output_file_name
+    with open(files_fname, 'wt') as fp:
+        for fname in input_files:
+            fp.write("file %s\n" % fname)
+
+    cmd = ['-f', 'concat', '-safe', '0', '-i', files_fname,
+           '-c', 'copy', output_file_name]
+    LOG.info('Merging chunks %s into file %s', input_files, output_file_name)
+    try:
+        ffmpeg(cmd)
+    finally:
+        safe_delete(files_fname)
+
+
+def cut(input_file_name, output_file_name, slices, copy=False):
+    """Cut several slices from a file, then merge them back."""
+    base_cmd = ['-i', input_file_name]
+    base_file_name, ext = os.path.splitext(output_file_name)
+
+    files = []
+    try:
+        for i, s in enumerate(slices):
+            cmd = base_cmd + ['-ss', s.begin.to_ffmpeg()]
+            if s.end is not EOF:
+                cmd += ['-to', s.end.to_ffmpeg()]
+            if copy:
+                cmd += ['-c', 'copy']
+            fname = '%s.chunk%d%s' % (base_file_name, i, ext)
+            cmd.append(fname)
+
+            LOG.info('Splitting %s of file %s into temporary file %s',
+                     s, input_file_name, fname)
+            ffmpeg(cmd)
+            files.append(fname)
+
+        merge(files, output_file_name)
+    finally:
+        safe_delete(files)
